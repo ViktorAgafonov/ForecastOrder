@@ -369,6 +369,10 @@ class ItemMapping:
                     similar_groups[group_id] = []
                 similar_groups[group_id].append(item_key)
             
+            # Удаляем группы, содержащие только один элемент, так как они не имеют смысла для сопоставления
+            similar_groups = {group_id: items for group_id, items in similar_groups.items() if len(items) > 1}
+            logger.info(f"После фильтрации групп с одним элементом осталось {len(similar_groups)} групп")
+            
             return similar_groups
         except Exception as e:
             logger.error(f"Ошибка при поиске похожих элементов: {e}")
@@ -472,6 +476,11 @@ class ItemMapping:
             added_groups = 0
             
             for group_id, items_list in similar_items.items():
+                # Пропускаем группы с одним элементом, так как они не имеют смысла для сопоставления
+                if len(items_list) <= 1:
+                    logger.debug(f"Пропущена группа {group_id} с одним элементом")
+                    continue
+                    
                 # Формируем группу в нужном формате
                 group_items = []
                 group_name = ""
@@ -503,8 +512,8 @@ class ItemMapping:
                         exists = True
                         break
                 
-                if not exists and group_items:
-                    # Добавляем новую группу
+                if not exists and len(group_items) > 1:
+                    # Добавляем новую группу только если в ней более одного элемента
                     # Используем артикул в качестве идентификатора группы
                     self.mappings[group_id] = group
                     added_groups += 1

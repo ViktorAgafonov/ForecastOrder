@@ -1,9 +1,14 @@
 import pandas as pd
 import numpy as np
+import re
+import math
 from datetime import datetime, timedelta
+import logging
+import traceback
+import os
 import matplotlib.pyplot as plt
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvassor
 import logging
 
 # Настройка логирования
@@ -208,7 +213,8 @@ class OrderAnalyzer:
                     
                     # 1. Проверяем сам group_id
                     if group_id in item_lead_times:
-                        lead_time = item_lead_times[group_id]
+                        # Округляем срок поставки в большую сторону (ceil)
+                        lead_time = math.ceil(item_lead_times[group_id])
                         logger.info(f"Для группы {group_id} используется индивидуальный срок поставки: {lead_time} дней")
                     else:
                         # 2. Проверяем очищенный group_id (без префикса art_)
@@ -217,7 +223,8 @@ class OrderAnalyzer:
                             clean_group_id = group_id[4:]
                         
                         if clean_group_id in article_lead_times:
-                            lead_time = article_lead_times[clean_group_id]
+                            # Округляем срок поставки в большую сторону (ceil)
+                            lead_time = math.ceil(article_lead_times[clean_group_id])
                             logger.info(f"Для группы {group_id} используется срок поставки очищенного ID: {lead_time} дней")
                         else:
                             # 3. Проверяем артикулы в списке элементов
@@ -226,7 +233,8 @@ class OrderAnalyzer:
                                     if isinstance(item, tuple) and len(item) > 1:
                                         article = item[1]
                                         if article in article_lead_times:
-                                            lead_time = article_lead_times[article]
+                                            # Округляем срок поставки в большую сторону (ceil)
+                                            lead_time = math.ceil(article_lead_times[article])
                                             logger.info(f"Для группы {group_id} используется срок поставки артикула {article}: {lead_time} дней")
                                             break
                 
@@ -333,6 +341,47 @@ class OrderAnalyzer:
             
             recommendations = []
             
+            # Получаем данные о заказах для проверки целых/дробных количеств
+            quantity_history = {}
+            
+            # Проверяем, есть ли у нас доступ к данным о заказах
+            if hasattr(self.data_processor, 'processed_data') and self.data_processor.processed_data is not None:
+                # Ищем столбец с количеством
+                quantity_col = next((col for col in self.data_processor.processed_data.columns if 'числовое' in col), None)
+                
+                if quantity_col:
+                    # Для каждой группы товаров проверяем, были ли заказы только в целых количествах
+                    for _, row in self.predictions.iterrows():
+                        group_id = row['group_id']
+                        items = row['items']
+                        
+                        # Получаем все заказы для элементов этой группы
+                        group_orders = []
+                        
+                        for item in items:
+                            if isinstance(item, tuple) and len(item) >= 2:
+                                # Получаем наименование и артикул
+                                name, code = item[0], item[1]
+                                
+                                # Ищем столбцы с наименованием и артикулом
+                                name_col = next((col for col in self.data_processor.processed_data.columns if 'наименование' in col and 'норм' not in col), None)
+                                article_col = next((col for col in self.data_processor.processed_data.columns if 'артикул' in col and 'норм' not in col), None)
+                                
+                                if name_col and article_col:
+                                    # Фильтруем заказы для этого товара
+                                    mask = (self.data_processor.processed_data[name_col] == name) & (self.data_processor.processed_data[article_col] == code)
+                                    item_orders = self.data_processor.processed_data.loc[mask, quantity_col].tolist()
+                                    group_orders.extend(item_orders)
+                        
+                        # Проверяем, все ли заказы были в целых количествах
+                        all_integer = all(float(qty).is_integer() for qty in group_orders if pd.notna(qty))
+                        quantity_history[group_id] = {
+                            'all_integer': all_integer,
+                            'orders': group_orders
+                        }
+                        
+                        logger.debug(f"Группа {group_id}: всего заказов - {len(group_orders)}, все целые - {all_integer}")
+            
             for _, row in self.predictions.iterrows():
                 group_id = row['group_id']
                 items = row['items']
@@ -346,13 +395,22 @@ class OrderAnalyzer:
                     representative_item = items[0] if isinstance(items, list) and items else "Неизвестный элемент"
                     
                     for order in upcoming_orders:
+                        # Получаем прогнозируемое количество
+                        quantity = order['estimated_quantity']
+                        
+                        # Проверяем, нужно ли округлять до целого числа
+                        if group_id in quantity_history and quantity_history[group_id]['all_integer'] and len(quantity_history[group_id]['orders']) > 0:
+                            # Если все предыдущие заказы были в целых количествах, округляем до ближайшего целого
+                            quantity = round(quantity)
+                            logger.debug(f"Округлено количество для группы {group_id}: {order['estimated_quantity']} -> {quantity}")
+                        
                         recommendations.append({
                             'group_id': group_id,
                             'item': representative_item,
                             'similar_items': items,
                             'order_date': order['order_date'],
                             'forecast_date': order['forecast_date'],
-                            'quantity': order['estimated_quantity']
+                            'quantity': quantity
                         })
             
             # Сортируем рекомендации по дате заказа
